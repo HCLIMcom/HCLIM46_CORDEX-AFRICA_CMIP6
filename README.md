@@ -13,6 +13,7 @@ Current experiments:
 Before running:
 - Double check ECMWF account, output paths, etc. in Env_submit and Env_system.
 - Double check settings in ecf/config_exp.h
+- Update path to HCLIM in config-sh/hm_rev
 - Double check surfex output and surfex namelist in nam.
 
 --------
