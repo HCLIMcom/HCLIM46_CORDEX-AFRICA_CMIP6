@@ -1,0 +1,245 @@
+#!/bin/bash
+# $Id$
+
+trap 'echo $0 failed; exit 159' 0
+
+# -------------------------------------------------------------------------
+[ -x Env_system ] ||
+{ echo 'cannot find Env_system - did you run "Harmonie setup" before?'; exit 1; }
+
+ENV_SYSTEM=`pwd`/Env_system
+export ENV_SYSTEM
+
+#|===================================================================|#
+#|                                                                   |#
+#| script:                                                           |#
+#|          Harmonie                                                 |#
+#| purpose:                                                          |#
+#|          user interface to facilitate the running of the Harmonie |#
+#|          analysis and forecast system                             |#
+#| method:                                                           |#
+#|          Harmonie will execute the action specified on the command|#
+#|          line. alternatively, when no action is specified it will |#
+#|          enter its interactive mode. in this mode the same actions|#
+#|          may be specified interactively by the operator.          |#
+#|          valid actions are:                                       |#
+#|          - start [$DATE]$HLUTC                                    |#
+#|            to start a new experiment                              |#
+#|          - prod                                                   |#
+#|            to check and continue or recover a production run      |#
+#|          - continue                                               |#
+#|            to start with DTG as given in progress.log             |#
+#|          - resume                                                 |#
+#|            to resume an interrupted experiment at check point     |#
+#|          - Co                                                     |#
+#|            to invoke HARMONIE system scripts                      |#
+#|                                                                   |#
+#|===================================================================|#
+
+timestamp()
+{
+    date +"%y-%m-%d %T Harmonie: $*"
+}
+
+#================================================== function of actions
+perform () {
+   if echo $* | grep '=' >/dev/null
+   then
+      eval $*
+      export `echo $*|awk -F= '{print $1}'`
+   else
+      Actions $*
+   fi
+}
+
+#================ analyse command line into env HM_CLA and var $command
+
+while [ $# -gt 0 ]; do
+    cla=$1
+    if echo $cla | grep '=' >/dev/null ; then
+        if echo $cla | grep '^DTG=' >/dev/null; then
+            # Save also as DTG_CLA since DTG may be overridden by sourcing of progress.log
+            cla2=$( echo $cla | sed 's/DTG=/DTG_CLA=/' )
+            perform $cla2
+        elif echo $cla | grep '^LL=' >/dev/null; then     # LL -> LL_CLA
+            cla=$( echo $cla | sed 's/LL=/LL_CLA=/' )
+            HM_CLA="$HM_CLA $cla"
+        else
+            HM_CLA="$HM_CLA $cla"
+        fi
+        perform $cla
+    else
+        command=$command' '$cla
+    fi
+    shift
+done
+
+#============================================ experiment name and HM_WD
+cwd=$(pwd)
+HM_HOME=${HM_HOME-$( dirname $cwd )}
+if [ ! "$EXP" ]; then
+    timestamp EXP not set, trying to derive it from cwd
+    EXP=`basename $cwd`
+    if [ $HM_HOME/$EXP = $cwd ]; then
+        timestamp I think EXP is $EXP
+        if echo $EXP | grep '\.' >/dev/null
+        then
+            timestamp ERROR: Your experiment name $EXP contains . which is not allowed
+            exit 1
+        fi
+        export EXP
+    else
+        timestamp "EXP not set, and cwd not of the form 'HM_HOME/exp'"
+        timestamp "cwd='$cwd'; HM_HOME='$HM_HOME'; Harmonie failed"
+        exit 1
+    fi
+elif [ "$HM_HOME/$EXP" != "$cwd" ]; then
+    timestamp "EXP is set to $EXP, but cwd does not match"
+    timestamp "cwd='$cwd'; HM_HOME='$HM_HOME'; Harmonie failed"
+    exit 1
+fi
+[ -d "$HM_HOME" ] || { timestamp "HM_HOME ($HM_HOME) is not a directory"; exit 1; }
+HM_WD=$HM_HOME/$EXP
+
+EXPERIMENT_IS_LOCKED=$HM_WD/experiment_is_locked$STREAM
+
+[ -d "$HM_WD" ] || { timestamp "HM_WD ($HM_WD) is not a directory"; exit 1; }
+export HM_WD
+cd $HM_WD
+
+#====================================================== set environment
+export STREAM=${STREAM-""}
+
+. $ENV_SYSTEM
+
+#======================================== check the suite isn't running
+
+# For following actions block request if suite is already active
+action=$(perl -e 'print $ARGV[0]' $command)
+if echo $action | grep -Eiqw "prod|start|resume|continue|install|climate|testbed|obsmon|obsmonprod"; then
+  blockactive="yes"
+else
+  blockactive="no"
+fi
+
+# Check that another ecFlow scheduler is not already running for this EXP
+# Determine and export default ECF_HOST and ECF_PORT and check if this experiment is already active
+usernumber=$(id -u)
+export ECF_PORT=${ECF_PORT-$((1500+usernumber))}
+export ECF_HOST=${ECF_HOST-$(hostname)}
+if [ "$blockactive" = "yes" ]; then
+  suite_state=$(ecflow_client --get_state=/$EXP --host=$ECF_HOST --port=$ECF_PORT 2>&1 | grep "^suite $EXP")
+  echo $suite_state | grep -q 'state:active' && \
+    { timestamp "Suite $EXP is already active in ecFlow server ${ECF_HOST}:${ECF_PORT}"; echo $suite_state; exit 1; }
+fi
+
+#======================================================= version number
+
+[ "$HM_REV" ] || {
+   [ -s config-sh/hm_rev ] ||
+   { timestamp 'cannot find config-sh/hm_rev - did you run "Harmonie setup" before?'; exit 1; }
+   HM_REV=`cat config-sh/hm_rev | sed "s/\/$//"`
+   timestamp this is  $HM_REV
+}
+[ "$HM_REV" ] || { timestamp "HM_REV must be a string, in config-sh/hm_rev"; exit 1; }
+export HM_REV
+
+if [ $HM_WD == $HM_REV ] ; then
+ rm -f $EXPERIMENT_IS_LOCKED
+fi
+
+#======================= essential working directories: HM_DATA, HM_LIB
+[ -d $HM_DATA ] || $MKDIR $HM_DATA
+[ -d $HM_DATA -a -x $HM_DATA -a -w $HM_DATA ] ||
+   { timestamp "HM_DATA ($HM_DATA) is not a write and execute enabled directory"; exit 1; }
+[ -d $HM_LIB  ] || $MKDIR $HM_LIB
+[ -d $HM_LIB -a -x $HM_LIB -a -w $HM_LIB ] ||
+   { timestamp "HM_LIB ($HM_LIB) is not a write and execute enabled directory"; exit 1; }
+
+#========================================================= Boot scripts
+( cd $HM_LIB 			# order in PATH is HM_WD:HM_REV
+
+  if [ ! -s $EXPERIMENT_IS_LOCKED ] ; then
+    # HM_REV
+    for dir in scr ecf suites ; do
+      $MKDIR $dir
+      ${RSYNC-rsync} -au $RSYNC_EXCLUDE $HM_REV/$dir/ $dir || exit 1
+    done 
+  fi
+
+  # Sanity check for more informal error message when working directory has been deleted
+  if [ ! -f scr/Actions ] && [ -s $EXPERIMENT_IS_LOCKED ]; then
+    echo " ********************************************************************"
+    echo " ************************* NB!!!! ***********************************"
+    echo "A necessary file is missing in $HM_LIB"
+    echo "Remove the file $EXPERIMENT_IS_LOCKED to do a new synchronization when you start the experiment"
+    echo
+    exit 1
+  fi
+  find scr -type f ! -perm -u+w -exec chmod u+w {} \;
+
+  # HM_WD
+  for dir in scr ecf suites config-sh ; do
+    if [ -d "$HM_WD/$dir" ]; then
+      ${RSYNC-rsync} -a $RSYNC_EXCLUDE $HM_WD/$dir/ $dir || exit
+    fi
+  done 
+  ${RSYNC-rsync} -a                $HM_WD/Env_submit Env_submit || exit
+
+) || { timestamp failed; exit 1; }
+export HM_CLA
+HM_CLA="HM_REV=$HM_REV HM_WD=$HM_WD $HM_CLA"		# HM_REV HM_WD needed further down
+
+#=============================== non-interactive when options are given
+[ "$command" ] && {
+   if [ "$1" = "-q" ]
+   then
+      quickstart=1
+   else
+      perform $command || exit
+      trap - 0
+      exit
+   fi
+}
+
+#====================================================== welcome message
+if tty >/dev/null 2>&1
+then
+   if [ ! "$quickstart" = 1 ]
+   then Whatis `basename $0` 2>/dev/null
+   fi
+   prompt='[1mharmonie> [m'
+   echo $prompt|awk '{printf("%s",$0)}'
+fi
+
+#=============================================== take action on command
+while read command
+do
+   if [ ! x"$command" = x ]
+   then
+      [ x"$command" = xquit ] && { trap - 0; exit; }
+      if [ `echo "x$command"|awk '{print $1}'` = 'x.' ]
+      then
+         file=`echo $command|awk '{print $2}'`
+         lines=0
+         if [ "$file" ]
+         then
+            lines=`awk 'END{print NR}' $file 2>/dev/null ||\
+               {
+                  timestamp cannot open $file
+                  echo 0
+               }`
+         fi
+         j=0
+         while [ $j -lt $lines ]
+         do
+            j=`expr $j + 1`
+            line=`tail +j|head -1`
+            perform $line
+         done
+      else
+         perform $command
+      fi
+   fi
+   echo $prompt|awk '{printf("%s",$0)}'
+done
